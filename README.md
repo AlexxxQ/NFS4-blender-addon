@@ -4,12 +4,13 @@ Need for Speed High Stakes PS1 vehicle and track tools, updated for Blender 5.1.
 
 ## Install
 
-Download [NFS_HS_PS1_IO_Blender_5.1.2_track_import.zip](./NFS_HS_PS1_IO_Blender_5.1.2_track_import.zip) and install it through **Edit > Preferences > Add-ons > Install from Disk**, then enable **Need for Speed High Stakes PS1 GEO/VIV Import/Export**.
+Download [NFS_HS_PS1_IO_Blender_5.1.2_VIV_tools.zip](./NFS_HS_PS1_IO_Blender_5.1.2_VIV_tools.zip) and install it through **Edit > Preferences > Add-ons > Install from Disk**, then enable **Need for Speed High Stakes PS1 GEO/VIV Import/Export**.
 
 ## Vehicle features
 
 - Import and export GEO models with PSH texture-page atlases.
 - Browse vehicles across VIV archives in a selected DATA folder.
+- Select one of 16 game palette color slots during VIV import; slots use the vehicle's L and D palette banks.
 - Export edited GEO and texture pages back into a VIV archive.
 - Decode PS1 transparent and semi-transparent CLUT pixels.
 - Use dithered rendering with the PSH alpha output connected directly to Principled BSDF Alpha for vehicle materials 4 and 13.

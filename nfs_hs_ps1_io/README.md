@@ -18,7 +18,7 @@ The default scale is 0.01 and applies consistently to road geometry, static mesh
 
 ### VIV vehicle workflow
 
-- **File > Import > NFS High Stakes PS1 vehicle archive (.viv)** opens a VIV picker, then a second dialog listing vehicles from every VIV in the selected folder. Choose a vehicle to open its matching archive and import the GEO; duplicate vehicle labels include the archive name. Companion PSH pages are unpacked temporarily and imported as texture atlases.
+- **File > Import > NFS High Stakes PS1 vehicle archive (.viv)** opens a VIV picker, then a second dialog listing vehicles from every VIV in the selected folder. Choose a vehicle to open its matching archive and import the GEO; duplicate vehicle labels include the archive name. Companion PSH pages are unpacked temporarily and imported as texture atlases. The **Color** setting selects one of the game's 16 palette slots (shown as Color 1–16 because the game data has no names); the first and second groups of eight use the vehicle's L and D palette banks.
 - Select the imported vehicle collection and use **File > Export > NFS High Stakes PS1 vehicle archive (.viv)**. The add-on exports the edited GEO and repacks the archive. It updates matching 256x256 PSH image datablocks with the edited atlas colors, quantizing them to the original 4/8/16-bit page format, and retains unrelated archive members.
 - Export to a new VIV file. The input archive is not overwritten.
 
@@ -38,4 +38,4 @@ Texture editing is page-based: keep each PSH image at 256x256 and retain its ima
 - Uses Blender's blended surface method only for material IDs with GEO faces that enable STP transparency.
 - Uses dithered rendering with a direct PSH alpha link for vehicle material IDs 4 and 13.
 - Added an optional left/right mirror that reverses face winding and UV corners with the geometry.
-
+- Added a VIV import color selector that applies the selected car palette bank and row to indexed vehicle textures.

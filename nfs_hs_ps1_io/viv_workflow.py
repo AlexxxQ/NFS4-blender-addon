@@ -266,6 +266,12 @@ class ImportNFSVIV(Operator, ImportHelper):
     vehicle: EnumProperty(name="Vehicle", items=enum_geos)
     clear_scene: BoolProperty(name="Clear scene", default=True)
     mirror_left_right: BoolProperty(name="Mirror left/right", default=True)
+    car_color: EnumProperty(
+        name="Color",
+        description="Select the game's indexed vehicle paint color",
+        items=[(str(i), "Color %d" % (i + 1), "Game color slot %d" % (i + 1)) for i in range(16)],
+        default="0",
+    )
     choose_vehicle: BoolProperty(default=False, options={"HIDDEN"})
 
     def invoke(self, context, event):
@@ -295,7 +301,8 @@ class ImportNFSVIV(Operator, ImportHelper):
                             f.write(payload)
                 geo_path = os.path.join(temp, os.path.basename(selected))
                 status = geo_import.main(context, geo_path, False, self.clear_scene,
-                                         default_geo_matrix(), self.mirror_left_right)
+                                         default_geo_matrix(), self.mirror_left_right,
+                                         int(self.car_color))
             if status == {"CANCELLED"}:
                 return status
             coll = bpy.data.collections.get(os.path.basename(selected))
@@ -313,6 +320,7 @@ class ImportNFSVIV(Operator, ImportHelper):
         self.layout.prop(self, "vehicle", text="Vehicle in archive")
         self.layout.prop(self, "clear_scene")
         self.layout.prop(self, "mirror_left_right")
+        self.layout.prop(self, "car_color")
 
 
 class ExportNFSVIV(Operator, ExportHelper):

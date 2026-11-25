@@ -53,13 +53,18 @@ CAR_TEXTURE_NAMES = (
 	"bROn", "bSOn", "shdw", "sFOn", "sROn", "ltOn", "dcl1", "dcl2", "dcl3", "dcl4",
 	"dcl5", "dcl6", "ins0", "ins1", "ins2", "ins3", "ins4", "ins5", "ins6", "ins7", "ins8",
 )
+CAR_PALETTE_TEXTURES = {
+	"pfrn": "frnt", "prea": "rear", "psid": "side", "ptp1": "top1",
+	"ptp2": "top2", "pwnd": "wndw", "pftd": "ftdm", "pspl": "splr",
+	"pex2": "ext2", "pex3": "ext3", "pex4": "ext4", "pwhl": "whl ",
+}
 
 ACTIVE_CAR_TEXTURES = {}
 ACTIVE_CAR_STP_TEXTURES = set()
 ACTIVE_CAR_SEMITRANS_TEXTURES = set()
 
 
-def read_psh_atlas(file_path):
+def read_psh_atlas(file_path, car_color=0):
 	"""Decode a PS1 SHPP texture file into its 256x256 VRAM layout."""
 	with open(file_path, "rb") as file:
 		data = file.read()
@@ -69,15 +74,41 @@ def read_psh_atlas(file_path):
 	shape_count = struct.unpack_from("<I", data, 8)[0]
 	if shape_count > 4096 or 16 + shape_count * 8 > len(data):
 		return None, set()
+	# Car paint colors are stored as 256-color CLUTs in companion Pxxxx
+	# shapes. Each CLUT contains sixteen 16-color rows; the L/D PSH bank is
+	# selected by load_car_textures, while the row is the chosen paint color.
+	palette_banks = {}
+	shape_records = []
+	for index in range(shape_count):
+		entry = 16 + index * 8
+		shape_name = data[entry:entry + 4].decode("ascii", errors="ignore").strip(" \0").lower()
+		offset = struct.unpack_from("<I", data, entry + 4)[0]
+		if not shape_name or offset + 16 > len(data):
+			continue
+		shape_records.append((shape_name, offset))
+		if not shape_name.startswith("p"):
+			continue
+		kind = data[offset]
+		depth_code = kind & 3
+		if depth_code not in (0, 1, 2):
+			continue
+		depth = (4, 8, 16)[depth_code]
+		next_offset = data[offset + 1] | (data[offset + 2] << 8) | (data[offset + 3] << 16)
+		palette_offset = offset + next_offset + 16
+		if depth == 8 and next_offset >= 16 and palette_offset + 256 * 2 <= len(data):
+			bank = []
+			for color_index in range(256):
+				word = struct.unpack_from("<H", data, palette_offset + color_index * 2)[0]
+				bank.append((word & 31, (word >> 5) & 31, (word >> 10) & 31, word))
+			texture_name = CAR_PALETTE_TEXTURES.get(shape_name)
+			if texture_name:
+				palette_banks[texture_name.strip().lower()] = bank
 
 	width = height = 256
 	pixels = [0.0] * (width * height * 4)
 	shape_names = set()
 	stp_shape_names = set()
-	for index in range(shape_count):
-		entry = 16 + index * 8
-		name = data[entry:entry + 4].decode("ascii", errors="ignore").strip(" \0").lower()
-		offset = struct.unpack_from("<I", data, entry + 4)[0]
+	for name, offset in shape_records:
 		if not name or offset + 16 > len(data):
 			continue
 		shape_names.add(name)
@@ -105,9 +136,15 @@ def read_psh_atlas(file_path):
 			palette_size = 16 if depth == 4 else 256
 			if next_offset < 16 or palette_offset + palette_size * 2 > len(data):
 				continue
+			bank = palette_banks.get(name)
+			if bank:
+				color_row = int(car_color) & 7
+				palette_words = [entry[3] for entry in bank[color_row * 16:(color_row + 1) * 16]]
+			else:
+				palette_words = [struct.unpack_from("<H", data, palette_offset + color_index * 2)[0]
+					for color_index in range(palette_size)]
 			palette = []
-			for color_index in range(palette_size):
-				word = struct.unpack_from("<H", data, palette_offset + color_index * 2)[0]
+			for word in palette_words:
 				r = (word & 31) / 31.0
 				g = ((word >> 5) & 31) / 31.0
 				b = ((word >> 10) & 31) / 31.0
@@ -152,7 +189,7 @@ def read_psh_atlas(file_path):
 	return image, shape_names
 
 
-def load_car_textures(geo_path):
+def load_car_textures(geo_path, car_color=0):
 	"""Find companion PSH files and assign their atlases to GEO texture IDs."""
 	global ACTIVE_CAR_TEXTURES
 	global ACTIVE_CAR_STP_TEXTURES
@@ -163,7 +200,7 @@ def load_car_textures(geo_path):
 		for filename in os.listdir(os.path.dirname(os.path.abspath(geo_path))):
 			if filename.lower().endswith(".psh"):
 				path = os.path.join(os.path.dirname(os.path.abspath(geo_path)), filename)
-				image, shape_names = read_psh_atlas(path)
+				image, shape_names = read_psh_atlas(path, car_color)
 				if image is not None:
 					stem = os.path.splitext(filename)[0].lower()
 					texture_sources.append((stem[-1:] if stem else "", image, shape_names))
@@ -175,7 +212,8 @@ def load_car_textures(geo_path):
 		if name == "dtp1":
 			name = "dtop"
 		if texture_index <= 18:
-			priority = ("l", "d", "h", "i", "g")
+			priority = (("d", "l", "h", "i", "g") if int(car_color) >= 8
+				else ("l", "d", "h", "i", "g"))
 		elif texture_index <= 40:
 			priority = ("h", "g", "i", "l", "d")
 		elif texture_index == 42:
@@ -209,7 +247,7 @@ def mirror_geo_left_right(objects):
 			face[6], face[7] = face[7], face[6]
 
 
-def main(context, file_path, is_traffic, clear_scene, global_matrix, mirror_left_right=True):
+def main(context, file_path, is_traffic, clear_scene, global_matrix, mirror_left_right=True, car_color=0):
 	if bpy.ops.object.mode_set.poll():
 		bpy.ops.object.mode_set(mode='OBJECT')
 	
@@ -217,15 +255,15 @@ def main(context, file_path, is_traffic, clear_scene, global_matrix, mirror_left
 		print("Clearing scene...")
 		clearScene(context)
 	
-	status = import_nfshs_ps1_models(context, file_path, is_traffic, clear_scene, global_matrix, mirror_left_right)
+	status = import_nfshs_ps1_models(context, file_path, is_traffic, clear_scene, global_matrix, mirror_left_right, car_color)
 	
 	return status
 
 
-def import_nfshs_ps1_models(context, file_path, is_traffic, clear_scene, m, mirror_left_right=True):
+def import_nfshs_ps1_models(context, file_path, is_traffic, clear_scene, m, mirror_left_right=True, car_color=0):
 	global ACTIVE_CAR_SEMITRANS_TEXTURES
 	start_time = time.time()
-	load_car_textures(file_path)
+	load_car_textures(file_path, car_color)
 	
 	main_collection_name = os.path.basename(file_path)
 	main_collection = bpy.data.collections.new(main_collection_name)
