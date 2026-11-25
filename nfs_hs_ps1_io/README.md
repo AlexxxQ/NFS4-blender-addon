@@ -5,10 +5,16 @@ Compatibility package prepared for Blender 5.1.2. It includes the original GEO i
 ## Install
 
 1. In Blender, open **Edit > Preferences > Add-ons**.
-2. Choose **Install from Disk** and select `NFS_HS_PS1_IO_Blender_5.1.2.zip`.
+2. Choose **Install from Disk** and select `NFS_HS_PS1_IO_Blender_5.1.2_track_import.zip`.
 3. Enable **Need for Speed High Stakes PS1 GEO Import/Export** in the add-on list.
 
 The import and export commands are available from **File > Import** and **File > Export**. Import `.geo` files extracted from the game archives. To load textures automatically, keep the vehicle's companion `.psh` files in the same folder as its `.geo`; the importer decodes the PS1 pages and links images to the material IDs used by the model. The importer also has a **Mirror left/right** option, enabled by default, for GEOs whose steering wheel and driver are on the opposite side.
+
+### PS1 track geometry and static-object import
+
+Use **File > Import > NFS High Stakes PS1 Track (.grp)** and select the base track geometry file, for example `ZTR03.GRP` from the game's `DATA` folder. Keep its matching PSH in the same folder; for night variants such as `ZTR00N.GRP`, the texture file is `ZTR00N0.PSH`. The importer decodes the PSH page into a 4096x768 atlas and maps track and static-object materials to their source shapes.
+
+The default scale is 0.01 and applies consistently to road geometry, static mesh coordinates, and instance positions. **Import Static Objects** is enabled by default and imports the track's shared object definitions and their placements, including chunk props, persistent statics, and midground statics. The objects are grouped into separate collections and use linked meshes for repeated instances. Camera-facing billboards and animated/sign objects are imported in a fixed pose; their in-game camera behavior and animation are not reproduced. Special-condition instance groups are imported into a separate collection when present. Sky/horizon import and track export are not implemented.
 
 ### VIV vehicle workflow
 
@@ -32,3 +38,4 @@ Texture editing is page-based: keep each PSH image at 256x256 and retain its ima
 - Uses Blender's blended surface method only for material IDs with GEO faces that enable STP transparency.
 - Uses dithered rendering with a direct PSH alpha link for vehicle material IDs 4 and 13.
 - Added an optional left/right mirror that reverses face winding and UV corners with the geometry.
+
