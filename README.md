@@ -15,3 +15,4 @@ Install `NFS_HS_PS1_IO_Blender_5.1.2_VIV_tools.zip` through **Edit > Preferences
 - Optional left/right mirroring for models whose steering side is reversed in the source data.
 
 The add-on source is in `nfs_hs_ps1_io/`.
+<img width="1359" height="1033" alt="Снимок экрана 2026-11-25 193641" src="https://github.com/user-attachments/assets/aec7fa96-4f7f-42ff-a0e6-d63f0d58809d" />
