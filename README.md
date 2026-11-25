@@ -16,3 +16,9 @@ Install `NFS_HS_PS1_IO_Blender_5.1.2_VIV_tools.zip` through **Edit > Preferences
 
 The add-on source is in `nfs_hs_ps1_io/`.
 <img width="800" height="608" alt="Снимок экрана 2026-11-25 193641" src="https://github.com/user-attachments/assets/86614ee0-2870-4bde-af73-eb124f86392f" />
+
+## PS1 track geometry import (develop)
+
+Use **File > Import > NFS High Stakes PS1 Track (.grp)** and select the track's base GRP file in the game's `DATA` folder, for example `ZTR03.GRP`. The matching PSH file is already in that same folder; for a night variant such as `ZTR00N.GRP`, the texture file is `ZTR00N0.PSH`.
+
+The importer builds one Blender object per track chunk, applies the PS1-to-Blender axis conversion, and defaults to 0.01 scale. It decodes the matching PSH page into a 4096x768 atlas and assigns material UVs from the shape and material tables. Track export, placed roadside object instances, and sky/horizon import are not implemented yet.
