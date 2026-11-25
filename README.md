@@ -4,7 +4,7 @@ Need for Speed High Stakes PS1 vehicle and track tools, updated for Blender 5.1.
 
 ## Install
 
-The add-on package is in `nfs_hs_ps1_io/`. To install it, create a ZIP with that folder at the archive root, then select it in **Edit > Preferences > Add-ons > Install from Disk** and enable **Need for Speed High Stakes PS1 GEO/VIV Import/Export**.
+Download [NFS_HS_PS1_IO_Blender_5.1.2_track_import.zip](./NFS_HS_PS1_IO_Blender_5.1.2_track_import.zip) and install it through **Edit > Preferences > Add-ons > Install from Disk**, then enable **Need for Speed High Stakes PS1 GEO/VIV Import/Export**.
 
 ## Vehicle features
 
