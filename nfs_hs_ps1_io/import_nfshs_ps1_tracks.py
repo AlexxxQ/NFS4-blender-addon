@@ -1,11 +1,12 @@
 """Import the static road mesh from a Need for Speed High Stakes PS1 track GRP."""
 
 import os
+import math
 import struct
 from array import array
 
 import bpy
-from mathutils import Matrix
+from mathutils import Matrix, Quaternion
 from bpy.types import Operator
 from bpy.props import BoolProperty, FloatProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper, axis_conversion, orientation_helper
@@ -187,7 +188,7 @@ def _transform_shape_uvs(uvs, flags):
 	# Match the UV corner permutations used by Track::ProcessFlipAndUVFlags.
 	permutations = {
 		0: (1, 0, 3, 2),
-		1: (2, 3, 1, 0),
+		1: (2, 3, 0, 1),
 		2: (2, 0, 3, 1),
 		3: (3, 2, 1, 0),
 		4: (1, 3, 0, 2),
@@ -309,6 +310,215 @@ def _read_shape_rects(psh_path):
 	return shapes
 
 
+
+def _read_object_definitions(data, persistent_groups, scale_factor):
+	"""Read reusable static meshes from the track's persistent object table."""
+	definitions_group = _first(persistent_groups, 8)
+	offsets_group = _first(persistent_groups, 0x26)
+	if definitions_group is None or offsets_group is None:
+		return []
+	definition_start, definition_end = _payload(data, definitions_group)
+	offsets_start, offsets_end = _payload(data, offsets_group)
+	if offsets_end - offsets_start < definitions_group[3] * 4:
+		return []
+
+	starts = [definition_start]
+	for index in range(1, definitions_group[3]):
+		delta = struct.unpack_from('<i', data, offsets_start + index * 4)[0]
+		starts.append(starts[-1] + delta)
+
+	definitions = []
+	for index, start in enumerate(starts):
+		end = starts[index + 1] if index + 1 < len(starts) else definition_end
+		if start < definition_start or start + 4 > end or end > definition_end:
+			definitions.append(None)
+			continue
+		object_id, vertex_count, quad_count = struct.unpack_from('<hBB', data, start)
+		vertices_start = start + 4
+		quads_start = vertices_start + vertex_count * 8
+		if quads_start + quad_count * 6 > end:
+			definitions.append(None)
+			continue
+
+		vertices = []
+		for vertex_index in range(vertex_count):
+			x, y, z, _light = struct.unpack_from('<4h', data, vertices_start + vertex_index * 8)
+			vertices.append((x * scale_factor, y * scale_factor, z * scale_factor))
+
+		faces, material_ids = [], []
+		for quad_index in range(quad_count):
+			material_id, a, b, c, d = struct.unpack_from('<h4B', data, quads_start + quad_index * 6)
+			face = (b, a, d, c)
+			if max(face) < len(vertices):
+				faces.append(face)
+				material_ids.append(max(0, material_id))
+		definitions.append({
+			'id': object_id,
+			'vertices': vertices,
+			'faces': faces,
+			'material_ids': material_ids,
+		})
+	return definitions
+
+
+def _iter_instance_records(data, group):
+	"""Yield supported variable-length object records from an instance group."""
+	if group is None:
+		return
+	_, group_start, group_length, count = group
+	pos = group_start + GROUP_HEADER_SIZE
+	end = group_start + group_length
+	for _ in range(count):
+		if pos + 8 > end:
+			return
+		size, instance_type, _object_index, z_offset, flags, definition_index = struct.unpack_from('<h4Bh', data, pos)
+		minimum_size = {1: 20, 2: 36, 5: 36, 9: 28}.get(instance_type)
+		if minimum_size is None or size < minimum_size or pos + size > end:
+			if size < 8 or pos + size > end:
+				return
+			pos += size
+			continue
+		x, y, z = struct.unpack_from('<3i', data, pos + 8)
+		record = {
+			'type': instance_type,
+			'definition_index': definition_index,
+			'flags': flags,
+			'position': (x, y, z),
+			'z_offset': z_offset,
+			'angle': 0,
+			'rotation': None,
+			'scale': (1.0, 1.0, 1.0),
+		}
+		if instance_type in (2, 5):
+			qx, qy, qz, qw = struct.unpack_from('<4h', data, pos + 20)
+			if qx or qy or qz or qw:
+				rotation = Quaternion((qw / 16384.0, qx / 16384.0, qy / 16384.0, qz / 16384.0))
+				rotation.normalize()
+				record['rotation'] = rotation
+			sx, sy, sz = struct.unpack_from('<3h', data, pos + 28)
+			# The game multiplies 16.16 rotation entries by scale * 256.
+			record['scale'] = (sx / 256.0, sy / 256.0, sz / 256.0)
+		elif instance_type == 9:
+			angle = struct.unpack_from('<h', data, pos + 20)[0]
+			sy = struct.unpack_from('<h', data, pos + 22)[0]
+			sx = struct.unpack_from('<h', data, pos + 24)[0]
+			record['angle'] = angle
+			record['scale'] = (sx / 256.0, sy / 256.0, sx / 256.0)
+		yaw = 2.0 * math.pi * record['angle'] / 4096.0
+		if instance_type == 9 and not (flags & 1):
+			record['rotation'] = Quaternion((math.cos(yaw / 2.0), 0.0, math.sin(yaw / 2.0), 0.0))
+		yield record
+		pos += size
+
+
+def _apply_track_materials(mesh, material_ids, material_shapes, shape_rects, track_image, material_cache):
+	material_slots = {}
+	for material_id in sorted(set(material_ids)):
+		material_slots[material_id] = len(mesh.materials)
+		if material_id not in material_cache:
+			shape_index = material_shapes.get(material_id, (-1, 0))[0]
+			material_cache[material_id] = _make_track_material(
+				'Track material %02d (shape %d)' % (material_id, shape_index), track_image)
+		mesh.materials.append(material_cache[material_id])
+	for face_index, material_id in enumerate(material_ids):
+		mesh.polygons[face_index].material_index = material_slots[material_id]
+	if not track_image:
+		return
+	uv_layer = mesh.uv_layers.new(name='NFS PS1 atlas UV')
+	for face_index, material_id in enumerate(material_ids):
+		shape_index, uv_flags = material_shapes.get(material_id, (-1, 0))
+		rect = shape_rects.get(shape_index)
+		if rect:
+			x, y, width, height = rect
+			u0, u1 = x / TRACK_ATLAS_WIDTH, (x + width) / TRACK_ATLAS_WIDTH
+			v0, v1 = 1.0 - (y + height) / TRACK_ATLAS_HEIGHT, 1.0 - y / TRACK_ATLAS_HEIGHT
+			pmx_uvs = ((u0, v1), (u1, v1), (u0, v0), (u1, v0))
+		else:
+			pmx_uvs = ((0.0, 1.0), (1.0, 1.0), (0.0, 0.0), (1.0, 0.0))
+		pmx_uvs = _transform_shape_uvs(pmx_uvs, uv_flags)
+		uvs = (pmx_uvs[0], pmx_uvs[1], pmx_uvs[3], pmx_uvs[2])
+		polygon = mesh.polygons[face_index]
+		for loop_index, uv in zip(polygon.loop_indices, uvs):
+			uv_layer.data[loop_index].uv = uv
+
+
+def _create_static_instances(context, data, track_name, root_groups, chunk_groups,
+                             material_shapes, shape_rects, track_image,
+                             material_cache, scale_factor, axis_matrix):
+    """Create linked Blender objects for track-owned static object instances."""
+    persistent = _first(root_groups, 0x21)
+    persistent_groups = _children(data, persistent) if persistent else []
+    midground_records = list(_iter_instance_records(data, _first(persistent_groups, 0x24)))
+    definitions = _read_object_definitions(data, persistent_groups, scale_factor)
+    if not definitions:
+        return 0
+
+    collections = {}
+    mesh_cache = {}
+    created = 0
+
+    def get_collection(key, label):
+        if key not in collections:
+            collection = bpy.data.collections.new('NFS HS PS1 %s %s' % (label, track_name))
+            context.scene.collection.children.link(collection)
+            collections[key] = collection
+        return collections[key]
+
+    def get_mesh(definition_index):
+        if definition_index in mesh_cache:
+            return mesh_cache[definition_index]
+        definition = definitions[definition_index]
+        if definition is None or not definition['faces']:
+            return None
+        mesh = bpy.data.meshes.new('TrackStaticDef_%03d_Mesh' % definition_index)
+        mesh.from_pydata(definition['vertices'], [], definition['faces'])
+        mesh.update()
+        _apply_track_materials(mesh, definition['material_ids'], material_shapes,
+                               shape_rects, track_image, material_cache)
+        mesh_cache[definition_index] = mesh
+        return mesh
+
+    def add_records(records, collection_key, collection_label, chunk_index=None, special=False):
+        nonlocal created
+        for record in records:
+            definition_index = record['definition_index']
+            if not (0 <= definition_index < len(definitions)):
+                continue
+            definition = definitions[definition_index]
+            mesh = get_mesh(definition_index)
+            if mesh is None:
+                continue
+            obj = bpy.data.objects.new(
+                'TrackStatic_%03d_ID%d' % (definition_index, definition['id']), mesh)
+            get_collection(collection_key, collection_label).objects.link(obj)
+            x, y, z = record['position']
+            translation = Matrix.Translation((x / 1024.0 * scale_factor,
+                                              y / 1024.0 * scale_factor,
+                                              z / 1024.0 * scale_factor))
+            rotation = record['rotation'] or Quaternion((1.0, 0.0, 0.0, 0.0))
+            scale = Matrix.Diagonal((*record['scale'], 1.0))
+            obj.matrix_world = axis_matrix @ translation @ rotation.to_matrix().to_4x4() @ scale
+            obj['nfs_definition_index'] = definition_index
+            obj['nfs_definition_id'] = definition['id']
+            obj['nfs_instance_type'] = record['type']
+            if chunk_index is not None:
+                obj['nfs_track_chunk'] = chunk_index
+            if special:
+                obj['nfs_special_variant'] = True
+            created += 1
+
+    def add_group(group, collection_key, collection_label, chunk_index=None, special=False):
+        if group is not None:
+            add_records(_iter_instance_records(data, group), collection_key,
+                        collection_label, chunk_index, special)
+
+    add_group(_first(persistent_groups, 7), 'persistent', 'Persistent Statics')
+    add_records(midground_records, 'midground', 'Midground Statics')
+    for chunk_index, chunk_group in enumerate(chunk_groups):
+        chunk_children = _children(data, chunk_group)
+        add_group(_first(chunk_children, 3), 'chunks', 'Chunk Statics', chunk_index)
+        add_group(_first(chunk_children, 0x15), 'special', 'Special Statics', chunk_index, True)
+    return created
 def _make_track_material(name, image=None):
 	material = bpy.data.materials.new(name)
 	material.use_nodes = True
@@ -328,7 +538,8 @@ def _make_track_material(name, image=None):
 	return material
 
 
-def import_track(context, filepath, clear_scene=True, scale_factor=0.01, global_matrix=None):
+def import_track(context, filepath, clear_scene=True, scale_factor=0.01,
+				 global_matrix=None, import_statics=True):
 	with open(filepath, 'rb') as stream:
 		data = stream.read()
 	if len(data) < GROUP_HEADER_SIZE:
@@ -362,6 +573,7 @@ def import_track(context, filepath, clear_scene=True, scale_factor=0.01, global_
 			context.scene.collection.children.unlink(scene_collection)
 	context.scene.collection.children.link(collection)
 	objects_created = 0
+	material_cache = {}
 	for chunk_index, chunk_group in enumerate(chunk_groups):
 		center = centers[chunk_index] if chunk_index < len(centers) else (0, 0, 0)
 		decoded = _decode_geometry(data, chunk_group, chunk_index, center, scale_factor)
@@ -375,37 +587,20 @@ def import_track(context, filepath, clear_scene=True, scale_factor=0.01, global_
 		collection.objects.link(obj)
 		if global_matrix is not None:
 			obj.matrix_world = global_matrix
-		used_material_ids = sorted(set(material_ids))
-		material_slots = {}
-		for mat_id in used_material_ids:
-			material_slots[mat_id] = len(mesh.materials)
-			shape_index = material_shapes.get(mat_id, (-1, 0))[0]
-			mesh.materials.append(_make_track_material('Track material %02d (shape %d)' % (mat_id, shape_index), track_image))
-		for face_index, mat_id in enumerate(material_ids):
-			mesh.polygons[face_index].material_index = material_slots[mat_id]
-		if track_image:
-			uv_layer = mesh.uv_layers.new(name='NFS PS1 atlas UV')
-			for face_index, mat_id in enumerate(material_ids):
-				shape_index, uv_flags = material_shapes.get(mat_id, (-1, 0))
-				rect = shape_rects.get(shape_index)
-				if rect:
-					x, y, width, height = rect
-					u0, u1 = x / TRACK_ATLAS_WIDTH, (x + width) / TRACK_ATLAS_WIDTH
-					v0, v1 = 1.0 - (y + height) / TRACK_ATLAS_HEIGHT, 1.0 - y / TRACK_ATLAS_HEIGHT
-					pmx_uvs = ((u0, v1), (u1, v1), (u0, v0), (u1, v0))
-				else:
-					pmx_uvs = ((0.0, 1.0), (1.0, 1.0), (0.0, 0.0), (1.0, 0.0))
-				pmx_uvs = _transform_shape_uvs(pmx_uvs, uv_flags)
-				# Face loops follow the game's point order [0, 1, 3, 2].
-				uvs = (pmx_uvs[0], pmx_uvs[1], pmx_uvs[3], pmx_uvs[2])
-				polygon = mesh.polygons[face_index]
-				for loop_index, uv in zip(polygon.loop_indices, uvs):
-					uv_layer.data[loop_index].uv = uv
+		_apply_track_materials(mesh, material_ids, material_shapes, shape_rects,
+							track_image, material_cache)
 		objects_created += 1
 	if objects_created == 0:
 		bpy.data.collections.remove(collection)
 		raise ValueError('Чанки найдены, но дорожные полигоны не распознаны. Формат этой трассы требует дополнительного разбора.')
-	return collection, objects_created
+	static_count = 0
+	if import_statics:
+		axis_matrix = global_matrix if global_matrix is not None else Matrix.Identity(4)
+		static_count = _create_static_instances(
+			context, data, track_name, root_children, chunk_groups,
+			material_shapes, shape_rects, track_image, material_cache,
+			scale_factor, axis_matrix)
+	return collection, objects_created, static_count
 
 
 @orientation_helper(axis_forward='-Y', axis_up='Z')
@@ -417,6 +612,7 @@ class IMPORT_OT_nfshs_ps1_track(Operator, ImportHelper):
 	filename_ext = '.grp'
 	filter_glob: StringProperty(default='*.grp', options={'HIDDEN'})
 	clear_scene: BoolProperty(name='Clear Scene', default=True)
+	import_statics: BoolProperty(name='Import Static Objects', description='Import signs, lamps, roadside props, and other track object instances', default=True)
 	scale_factor: FloatProperty(name='Scale', description='Scales the PS1 track world coordinates', default=0.01, min=0.0001, max=1.0)
 
 	def execute(self, context):
@@ -428,17 +624,18 @@ class IMPORT_OT_nfshs_ps1_track(Operator, ImportHelper):
 				to_up=self.axis_up,
 			).to_4x4()
 			global_matrix = Matrix.Diagonal((-1.0, 1.0, 1.0, 1.0)) @ global_matrix
-			collection, count = import_track(
+			collection, count, static_count = import_track(
 				context,
 				self.filepath,
 				self.clear_scene,
 				self.scale_factor,
 				global_matrix,
+				self.import_statics,
 			)
 		except Exception as error:
 			self.report({'ERROR'}, str(error))
 			return {'CANCELLED'}
-		self.report({'INFO'}, 'Imported %d track chunks into %s' % (count, collection.name))
+		self.report({'INFO'}, 'Imported %d track chunks and %d static instances into %s' % (count, static_count, collection.name))
 		return {'FINISHED'}
 
 
