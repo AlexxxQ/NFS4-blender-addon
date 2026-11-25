@@ -5,6 +5,7 @@ import struct
 from array import array
 
 import bpy
+from mathutils import Matrix
 from bpy.types import Operator
 from bpy.props import BoolProperty, FloatProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper, axis_conversion, orientation_helper
@@ -186,9 +187,9 @@ def _transform_shape_uvs(uvs, flags):
 	# Match the UV corner permutations used by Track::ProcessFlipAndUVFlags.
 	permutations = {
 		0: (1, 0, 3, 2),
-		1: (0, 3, 2, 1),
+		1: (2, 3, 1, 0),
 		2: (2, 0, 3, 1),
-		3: (3, 2, 0, 1),
+		3: (3, 2, 1, 0),
 		4: (1, 3, 0, 2),
 	}
 	modes = []
@@ -426,6 +427,7 @@ class IMPORT_OT_nfshs_ps1_track(Operator, ImportHelper):
 				to_forward=self.axis_forward,
 				to_up=self.axis_up,
 			).to_4x4()
+			global_matrix = Matrix.Diagonal((-1.0, 1.0, 1.0, 1.0)) @ global_matrix
 			collection, count = import_track(
 				context,
 				self.filepath,
