@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Need for Speed High Stakes PS1 GEO/VIV Import/Export",
     "author": "PolySoupList, DGIorio; Blender 5 compatibility updates",
-    "version": (1, 3, 2),
+    "version": (1, 3, 6),
     "blender": (3, 6, 0),
     "location": "File > Import/Export",
     "description": "Import/export NFS High Stakes PS1 vehicles and import track geometry",
