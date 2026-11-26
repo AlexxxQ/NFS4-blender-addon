@@ -19,10 +19,11 @@ The default scale is 0.01 and applies consistently to road geometry, static mesh
 ### VIV vehicle workflow
 
 - **File > Import > NFS High Stakes PS1 vehicle archive (.viv)** opens a VIV picker, then a second dialog listing vehicles from every VIV in the selected folder. Choose a vehicle to open its matching archive and import the GEO; duplicate vehicle labels include the archive name. Companion PSH pages are unpacked temporarily and imported as texture atlases. The **Color** setting selects one of the game's 16 palette slots (shown as Color 1–16 because the game data has no names); the first and second groups of eight use the vehicle's L and D palette banks.
-- Select the imported vehicle collection and use **File > Export > NFS High Stakes PS1 vehicle archive (.viv)**. The add-on exports the edited GEO and repacks the archive. It updates matching 256x256 PSH image datablocks with the edited atlas colors, quantizing them to the original 4/8/16-bit page format, and retains unrelated archive members.
+- Select the imported vehicle collection and use **File > Export > NFS High Stakes PS1 vehicle archive (.viv)**. By default, the add-on keeps the original GEO and original 256x256 PSH pages, adding a matching 512x512 image as an embedded HD atlas. Enable **Export geometry** when you have changed the model and want to rebuild its GEO. Enable **Export edited 256x256 PSH pages** only when you intentionally changed an original-size atlas; it is quantized to the original 4/8/16-bit page format. Unrelated archive members are retained.
+- The BMW Z3 garage/race car is the standard BMW Z3 car entry, but the game loads `ZZZBMWZH.VIV` for its high-detail model. The `(H variant)` item in the add-on is that same car's high-detail model. Import/export the H variant when changing its texture pages, and install the result as `ZZZBMWZH.VIV`; the base `ZZZBMWZ.VIV` contains different geometry and texture-page mappings.
 - Export to a new VIV file. The input archive is not overwritten.
 
-Texture editing is page-based: keep each PSH image at 256x256 and retain its image datablock name so it can be matched to the original archive member. The exporter writes colors into the existing PSH page shapes and palettes; shape dimensions and UV layout remain fixed.
+For HD texture replacement, resize or replace the matching PSH atlas image in the material with a 512x512 image before exporting. Keep the material ID and its source PSH association. The add-on stores each upgraded atlas and a material-to-atlas map inside the VIV; the modified port reads those members in both the vehicle selection menu and gameplay. Install the exported VIV in the game's `DATA` folder in place of the same vehicle variant. No loose PNG is needed.
 
 ## Compatibility changes
 

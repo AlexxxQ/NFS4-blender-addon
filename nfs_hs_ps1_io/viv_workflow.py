@@ -164,6 +164,60 @@ def _psh_edited(data, image):
     return bytes(out)
 
 
+def _image_png_payload(image):
+    """Encode a Blender image as PNG bytes without changing its saved path."""
+    old_path = image.filepath_raw
+    old_format = image.file_format
+    with tempfile.TemporaryDirectory(prefix="nfshs_hd_texture_") as temp:
+        path = os.path.join(temp, "atlas.png")
+        try:
+            image.filepath_raw = path
+            image.file_format = "PNG"
+            image.save()
+            with open(path, "rb") as f:
+                payload = f.read()
+        finally:
+            image.filepath_raw = old_path
+            image.file_format = old_format
+    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Blender did not produce a valid PNG texture")
+    return payload
+
+
+def _collection_materials(collection):
+    """Return texture-index materials belonging to this vehicle only."""
+    materials = {}
+    for obj in collection.all_objects:
+        if obj.type != 'MESH':
+            continue
+        for material in obj.data.materials:
+            if material is None:
+                continue
+            try:
+                texture_index = int(material.name.split('.', 1)[0])
+            except (TypeError, ValueError):
+                continue
+            if 0 <= texture_index < 51:
+                materials.setdefault(texture_index, material)
+    return materials
+
+
+def _image_for_psh(name, materials):
+    """Find the edited atlas even when the user replaced the imported image datablock."""
+    basename = os.path.basename(name)
+    original = bpy.data.images.get(basename)
+    for texture_index in range(51):
+        material = materials.get(texture_index)
+        if material is None or not material.use_nodes:
+            continue
+        for node in material.node_tree.nodes:
+            if (node.type == "TEX_IMAGE" and node.image is not None
+                    and material.get("nfs_psh_source_file") == basename
+                    and tuple(node.image.size) == (512, 512)):
+                return node.image
+    return original
+
+
 def vehicle_geos(entries):
     return [(name, payload) for name, payload in entries if name.lower().endswith(".geo")]
 
@@ -296,7 +350,8 @@ class ImportNFSVIV(Operator, ImportHelper):
                 return {"CANCELLED"}
             with tempfile.TemporaryDirectory(prefix="nfshs_viv_") as temp:
                 for name, payload in entries:
-                    if name == selected or name.lower().endswith(".psh"):
+                    lower_name = name.lower()
+                    if name == selected or lower_name.endswith(".psh") or lower_name.endswith(".psh.hd.png"):
                         with open(os.path.join(temp, os.path.basename(name)), "wb") as f:
                             f.write(payload)
                 geo_path = os.path.join(temp, os.path.basename(selected))
@@ -328,6 +383,16 @@ class ExportNFSVIV(Operator, ExportHelper):
     bl_label = "Export edited vehicle to VIV"
     filename_ext = ".viv"
     filter_glob: StringProperty(default="*.viv", options={"HIDDEN"})
+    export_geometry: BoolProperty(
+        name="Export geometry",
+        description="Rebuild the GEO model as well as writing edited texture pages",
+        default=False,
+    )
+    export_psh_edits: BoolProperty(
+        name="Export edited 256x256 PSH pages",
+        description="Re-encode original-size PSH textures from Blender images",
+        default=False,
+    )
 
     def invoke(self, context, event):
         coll = context.collection
@@ -342,37 +407,89 @@ class ExportNFSVIV(Operator, ExportHelper):
             return {"CANCELLED"}
         source = coll["nfs_viv_source"]
         geo_member = coll["nfs_viv_geo_member"]
+        materials = _collection_materials(coll)
         try:
             _, entries = read_bigf(source)
             with tempfile.TemporaryDirectory(prefix="nfshs_viv_export_") as temp:
-                geo_export.main(context, temp, False, default_geo_matrix())
-                exported = os.path.join(temp, coll.name)
-                if not os.path.isfile(exported):
-                    candidates = [os.path.join(temp, n) for n in os.listdir(temp) if n.lower().endswith(".geo")]
-                    if not candidates:
-                        raise ValueError("GEO exporter did not produce a file")
-                    exported = candidates[0]
-                new_geo = open(exported, "rb").read()
+                new_geo = None
+                if self.export_geometry:
+                    geo_export.main(context, temp, False, default_geo_matrix())
+                    exported = os.path.join(temp, coll.name)
+                    if not os.path.isfile(exported):
+                        candidates = [os.path.join(temp, n) for n in os.listdir(temp) if n.lower().endswith(".geo")]
+                        if not candidates:
+                            raise ValueError("GEO exporter did not produce a file")
+                        exported = candidates[0]
+                    new_geo = open(exported, "rb").read()
             replaced = False
             rebuilt = []
+            hd_images = []
+            hd_members = {}
             for name, payload in entries:
+                lower_name = name.lower()
+                if lower_name.endswith(".psh.hd.png"):
+                    # Rebuild this generated member from the current Blender image below.
+                    continue
                 if name == geo_member:
-                    payload, replaced = new_geo, True
-                elif name.lower().endswith(".psh"):
-                    image = bpy.data.images.get(os.path.basename(name))
-                    if image is not None and tuple(image.size) == (256, 256):
-                        payload = _psh_edited(payload, image)
+                    if new_geo is not None:
+                        payload = new_geo
+                    replaced = True
+                elif lower_name.endswith(".psh"):
+                    image = _image_for_psh(name, materials)
+                    if image is not None:
+                        size = tuple(image.size)
+                        if size == (256, 256) and self.export_psh_edits:
+                            payload = _psh_edited(payload, image)
+                        elif size == (512, 512):
+                            hd_member = name + ".hd.png"
+                            hd_images.append((hd_member, _image_png_payload(image)))
+                            hd_members[name.lower()] = hd_member
                 rebuilt.append((name, payload))
             if not replaced:
                 raise ValueError("Original GEO member not found in source archive")
+            rebuilt = [(n, p) for n, p in rebuilt if n.lower() != "nfs4_hd_map.bin"]
+            source_slots = {"h": 0, "i": 1, "l": 2, "d": 3, "g": 4, "": 5}
+            hd_map = bytearray([255] * 51)
+            for texture_index in range(len(hd_map)):
+                material = materials.get(texture_index)
+                source_file = material.get("nfs_psh_source_file") if material is not None else None
+                image = next((node.image for node in material.node_tree.nodes
+                              if material and material.use_nodes and node.type == "TEX_IMAGE"
+                              and node.image is not None and tuple(node.image.size) == (512, 512)), None) if material else None
+                if not source_file:
+                    continue
+                if image is None or source_file.lower() not in hd_members:
+                    continue
+                stem = os.path.splitext(source_file)[0].lower()
+                suffix = stem[-1:] if stem and stem[-1:] in source_slots else ""
+                if suffix in source_slots:
+                    hd_map[texture_index] = source_slots[suffix]
+            if any(value != 255 for value in hd_map):
+                rebuilt.append(("NFS4_HD_MAP.BIN", bytes(hd_map)))
+            rebuilt.extend(hd_images)
             output = write_bigf(rebuilt)
             with open(self.filepath, "wb") as f:
                 f.write(output)
-            self.report({"INFO"}, "Saved edited GEO and PSH texture pages in VIV")
+            if hd_images:
+                message = "Saved %s and PSH textures with %d embedded 512x512 HD atlas(es)" % (
+                    "GEO" if self.export_geometry else "original GEO", len(hd_images))
+            else:
+                message = "Saved %s and PSH textures; no matching 512x512 atlas was found" % (
+                    "GEO" if self.export_geometry else "original GEO")
+            self.report({"INFO"}, message)
             return {"FINISHED"}
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+
+    def draw(self, context):
+        coll = context.collection
+        if coll and coll.get("nfs_viv_source"):
+            self.layout.label(text="Source archive: %s" % os.path.basename(coll["nfs_viv_source"]))
+            self.layout.label(text="Source GEO: %s" % coll.get("nfs_viv_geo_member", "unknown"))
+            self.layout.label(text="Install into the matching vehicle variant VIV.")
+        self.layout.prop(self, "export_geometry")
+        self.layout.prop(self, "export_psh_edits")
 
 
 def menu_import(self, context):

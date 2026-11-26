@@ -60,6 +60,7 @@ CAR_PALETTE_TEXTURES = {
 }
 
 ACTIVE_CAR_TEXTURES = {}
+ACTIVE_CAR_SOURCE_FILES = {}
 ACTIVE_CAR_STP_TEXTURES = set()
 ACTIVE_CAR_SEMITRANS_TEXTURES = set()
 
@@ -192,8 +193,10 @@ def read_psh_atlas(file_path, car_color=0):
 def load_car_textures(geo_path, car_color=0):
 	"""Find companion PSH files and assign their atlases to GEO texture IDs."""
 	global ACTIVE_CAR_TEXTURES
+	global ACTIVE_CAR_SOURCE_FILES
 	global ACTIVE_CAR_STP_TEXTURES
 	ACTIVE_CAR_TEXTURES = {}
+	ACTIVE_CAR_SOURCE_FILES = {}
 	ACTIVE_CAR_STP_TEXTURES = set()
 	texture_sources = []
 	try:
@@ -202,8 +205,16 @@ def load_car_textures(geo_path, car_color=0):
 				path = os.path.join(os.path.dirname(os.path.abspath(geo_path)), filename)
 				image, shape_names = read_psh_atlas(path, car_color)
 				if image is not None:
+					hd_path = path + ".hd.png"
+					if os.path.isfile(hd_path):
+						hd_image = bpy.data.images.load(hd_path, check_existing=True)
+						bpy.data.images.remove(image, do_unlink=True)
+						hd_image.name = os.path.basename(filename) + ".HD"
+						hd_image.pack()
+						image = hd_image
 					stem = os.path.splitext(filename)[0].lower()
-					texture_sources.append((stem[-1:] if stem else "", image, shape_names))
+					source_suffix = stem[-1:] if stem and stem[-1:] in ("h", "i", "l", "d", "g") else ""
+					texture_sources.append((source_suffix, image, shape_names, os.path.basename(filename)))
 	except OSError as error:
 		print("Could not scan companion PSH textures: %s" % error)
 
@@ -212,19 +223,21 @@ def load_car_textures(geo_path, car_color=0):
 		if name == "dtp1":
 			name = "dtop"
 		if texture_index <= 18:
-			priority = (("d", "l", "h", "i", "g") if int(car_color) >= 8
-				else ("l", "d", "h", "i", "g"))
+			priority = (("d", "l", "h", "i", "g", "") if int(car_color) >= 8
+				else ("l", "d", "h", "i", "g", ""))
 		elif texture_index <= 40:
-			priority = ("h", "g", "i", "l", "d")
+			priority = ("h", "g", "i", "l", "d", "")
 		elif texture_index == 42:
-			priority = ("h", "i", "g", "l", "d")
+			priority = ("h", "i", "g", "l", "d", "")
 		else:
-			priority = ("i", "h", "g", "l", "d")
+			priority = ("i", "h", "g", "l", "d", "")
 		for suffix in priority:
-			match = next((image for source_suffix, image, names in texture_sources if source_suffix == suffix and name in names), None)
+			match = next(((image, source_file) for source_suffix, image, names, source_file in texture_sources if source_suffix == suffix and name in names), None)
 			if match is not None:
-				ACTIVE_CAR_TEXTURES[texture_index] = match
-				if name in match.get("nfs_ps1_stp_shapes", "").split("|"):
+				ACTIVE_CAR_TEXTURES[texture_index] = match[0]
+				ACTIVE_CAR_SOURCE_FILES[texture_index] = match[1]
+				match[0]["nfs_psh_source_file"] = match[1]
+				if name in match[0].get("nfs_ps1_stp_shapes", "").split("|"):
 					ACTIVE_CAR_STP_TEXTURES.add(texture_index)
 				break
 	if ACTIVE_CAR_TEXTURES:
@@ -483,6 +496,9 @@ def create_object(index, vertices, normals, faces):
 			if mat.node_tree.nodes[0].bl_idname != "ShaderNodeOutputMaterial":
 				mat.node_tree.nodes[0].name = material_name
 		image = ACTIVE_CAR_TEXTURES.get(textureIndex)
+		source_file = ACTIVE_CAR_SOURCE_FILES.get(textureIndex)
+		if source_file:
+			mat["nfs_psh_source_file"] = source_file
 		if image is not None:
 			nodes = mat.node_tree.nodes
 			shader = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None)
