@@ -61,6 +61,7 @@ CAR_PALETTE_TEXTURES = {
 
 ACTIVE_CAR_TEXTURES = {}
 ACTIVE_CAR_SOURCE_FILES = {}
+ACTIVE_CAR_PALETTE_TEXTURES = set()
 ACTIVE_CAR_STP_TEXTURES = set()
 ACTIVE_CAR_SEMITRANS_TEXTURES = set()
 
@@ -194,9 +195,11 @@ def load_car_textures(geo_path, car_color=0):
 	"""Find companion PSH files and assign their atlases to GEO texture IDs."""
 	global ACTIVE_CAR_TEXTURES
 	global ACTIVE_CAR_SOURCE_FILES
+	global ACTIVE_CAR_PALETTE_TEXTURES
 	global ACTIVE_CAR_STP_TEXTURES
 	ACTIVE_CAR_TEXTURES = {}
 	ACTIVE_CAR_SOURCE_FILES = {}
+	ACTIVE_CAR_PALETTE_TEXTURES = set()
 	ACTIVE_CAR_STP_TEXTURES = set()
 	texture_sources = []
 	try:
@@ -232,11 +235,14 @@ def load_car_textures(geo_path, car_color=0):
 		else:
 			priority = ("i", "h", "g", "l", "d", "")
 		for suffix in priority:
-			match = next(((image, source_file) for source_suffix, image, names, source_file in texture_sources if source_suffix == suffix and name in names), None)
+			match = next(((image, source_file, names) for source_suffix, image, names, source_file in texture_sources if source_suffix == suffix and name in names), None)
 			if match is not None:
 				ACTIVE_CAR_TEXTURES[texture_index] = match[0]
 				ACTIVE_CAR_SOURCE_FILES[texture_index] = match[1]
 				match[0]["nfs_psh_source_file"] = match[1]
+				if any(palette_name in match[2] and palette_texture.strip().lower() == name
+				       for palette_name, palette_texture in CAR_PALETTE_TEXTURES.items()):
+					ACTIVE_CAR_PALETTE_TEXTURES.add(texture_index)
 				if name in match[0].get("nfs_ps1_stp_shapes", "").split("|"):
 					ACTIVE_CAR_STP_TEXTURES.add(texture_index)
 				break
@@ -258,6 +264,8 @@ def mirror_geo_left_right(objects):
 		for face in obj[8]:
 			face[3], face[4] = face[4], face[3]
 			face[6], face[7] = face[7], face[6]
+			if len(face) >= 14:
+				face[10:12], face[12:14] = face[12:14], face[10:12]
 
 
 def main(context, file_path, is_traffic, clear_scene, global_matrix, mirror_left_right=True, car_color=0):
@@ -280,6 +288,7 @@ def import_nfshs_ps1_models(context, file_path, is_traffic, clear_scene, m, mirr
 	
 	main_collection_name = os.path.basename(file_path)
 	main_collection = bpy.data.collections.new(main_collection_name)
+	main_collection["nfs_viv_color"] = int(car_color) & 15
 	bpy.context.scene.collection.children.link(main_collection)
 	
 	print("Importing file %s" % os.path.basename(file_path))
@@ -311,7 +320,7 @@ def import_nfshs_ps1_models(context, file_path, is_traffic, clear_scene, m, mirr
 	
 	for index in range(0, len(Transformer_zObjects)):
 		Transformer_zObj = Transformer_zObjects[index]
-		numVertex, numFacet, translation, object_unk0, object_unk1, object_unk2, vertices, normals, faces = Transformer_zObj
+		numVertex, numFacet, translation, object_unk0, object_unk1, object_unk2, vertices, normals, faces = Transformer_zObj[:9]
 		
 		if len(vertices) > 0:
 			obj = create_object(index, vertices, normals, faces)
@@ -421,6 +430,49 @@ def read_Transformer_zScene(file_path, is_traffic):
 		for index in range(57):
 			Transformer_zObj = read_Transformer_zObj(f, is_traffic, index)
 			Transformer_zObjects.append(Transformer_zObj)
+		if not is_traffic:
+			extension = f.read(16)
+			if len(extension) == 16 and extension[:8] == b'NFSUV16\0':
+				version, object_count, payload_size = struct.unpack('<HHI', extension[8:])
+				payload = f.read(payload_size)
+				if version in (1, 2) and object_count == 57 and len(payload) == payload_size:
+					cursor = 0
+					valid = True
+					for Transformer_zObj in Transformer_zObjects:
+						if version == 2:
+							if cursor + 2 > len(payload):
+								valid = False
+								break
+							vertex_count = struct.unpack_from('<H', payload, cursor)[0]
+							cursor += 2
+							if vertex_count != len(Transformer_zObj[6]) or cursor + vertex_count * 12 > len(payload):
+								valid = False
+								break
+							exact_vertices = struct.unpack_from('<%df' % (vertex_count * 3), payload, cursor) if vertex_count else ()
+							cursor += vertex_count * 12
+							Transformer_zObj[6][:] = [tuple(exact_vertices[i*3+j] / VERTEX_SCALE for j in range(3)) for i in range(vertex_count)]
+						faces = Transformer_zObj[8]
+						if cursor + 2 > len(payload):
+							valid = False
+							break
+						facet_count = struct.unpack_from('<H', payload, cursor)[0]
+						cursor += 2
+						face_stride = 24 if version == 2 else 12
+						if facet_count != len(faces) or cursor + facet_count * face_stride > len(payload):
+							valid = False
+							break
+						for face in faces:
+							if version == 2:
+								face.extend(struct.unpack_from('<6f', payload, cursor))
+								face.append(2)
+								cursor += 24
+							else:
+								face.extend(struct.unpack_from('<6H', payload, cursor))
+								cursor += 12
+					if not valid or cursor != len(payload):
+						for Transformer_zObj in Transformer_zObjects:
+							for face in Transformer_zObj[8]:
+								del face[8:]
 	
 	Transformer_zScene = [unk0, unk1, Transformer_zObjects]
 	
@@ -464,10 +516,17 @@ def create_object(index, vertices, normals, faces):
 			normal_data.append([i, (0.0, 0.0, 0.0)])
 	
 	for i, face in enumerate(faces):
-		_flag, textureIndex, vertexId0, vertexId1, vertexId2, uv0, uv1, uv2 = face
+		_flag, textureIndex, vertexId0, vertexId1, vertexId2, uv0, uv1, uv2 = face[:8]
 		
 		face_vertices = [BMVert_dictionary[vertexId0], BMVert_dictionary[vertexId1], BMVert_dictionary[vertexId2]]
-		face_uvs = [[uv0[0]/0xFF, 1.0 - uv0[1]/0xFF], [uv1[0]/0xFF, 1.0 - uv1[1]/0xFF], [uv2[0]/0xFF, 1.0 - uv2[1]/0xFF]]
+		if len(face) >= 15 and face[14] == 2:
+			face_uvs = [[face[8], 1.0-face[9]], [face[10], 1.0-face[11]], [face[12], 1.0-face[13]]]
+		elif len(face) >= 14:
+			face_uvs = [[face[8]/65535.0, 1.0-face[9]/65535.0],
+			            [face[10]/65535.0, 1.0-face[11]/65535.0],
+			            [face[12]/65535.0, 1.0-face[13]/65535.0]]
+		else:
+			face_uvs = [[uv0[0]/0xFF, 1.0 - uv0[1]/0xFF], [uv1[0]/0xFF, 1.0 - uv1[1]/0xFF], [uv2[0]/0xFF, 1.0 - uv2[1]/0xFF]]
 		try:
 			BMFace = bm.faces.get(face_vertices) or bm.faces.new(face_vertices)
 		except:
@@ -499,6 +558,7 @@ def create_object(index, vertices, normals, faces):
 		source_file = ACTIVE_CAR_SOURCE_FILES.get(textureIndex)
 		if source_file:
 			mat["nfs_psh_source_file"] = source_file
+		mat["nfs_psh_palette_color"] = textureIndex in ACTIVE_CAR_PALETTE_TEXTURES
 		if image is not None:
 			nodes = mat.node_tree.nodes
 			shader = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None)

@@ -384,8 +384,8 @@ class ExportNFSVIV(Operator, ExportHelper):
     filename_ext = ".viv"
     filter_glob: StringProperty(default="*.viv", options={"HIDDEN"})
     export_geometry: BoolProperty(
-        name="Export geometry",
-        description="Rebuild the GEO model as well as writing edited texture pages",
+        name="Export geometry and UVs",
+        description="Required to save changed mesh geometry and UV coordinates into the GEO",
         default=False,
     )
     export_psh_edits: BoolProperty(
@@ -393,11 +393,25 @@ class ExportNFSVIV(Operator, ExportHelper):
         description="Re-encode original-size PSH textures from Blender images",
         default=False,
     )
+    hd_palette_color: EnumProperty(
+        name="HD color for palette textures",
+        description="Limit HD palette-based pages to one paint color",
+        items=[("IMPORTED", "Imported vehicle color", "Use the color selected when the VIV was imported"),
+               ("ALL", "All colors", "Use the HD page for every paint color")] +
+              [(str(i), "Color %d" % (i + 1), "Use this game paint color") for i in range(16)],
+        default="IMPORTED",
+    )
 
     def invoke(self, context, event):
         coll = context.collection
         if coll and coll.get("nfs_viv_source"):
             self.filepath = os.path.splitext(os.path.basename(coll["nfs_viv_source"]))[0] + "_edited.viv"
+            for material in _collection_materials(coll).values():
+                image = next((node.image for node in material.node_tree.nodes
+                              if material.use_nodes and node.type == "TEX_IMAGE"
+                              and node.image is not None and tuple(node.image.size) == (512, 512)), None)
+                if image is not None and "nfs_hd_color_specific" not in material:
+                    material["nfs_hd_color_specific"] = False
         return ExportHelper.invoke(self, context, event)
 
     def execute(self, context):
@@ -413,7 +427,9 @@ class ExportNFSVIV(Operator, ExportHelper):
             with tempfile.TemporaryDirectory(prefix="nfshs_viv_export_") as temp:
                 new_geo = None
                 if self.export_geometry:
-                    geo_export.main(context, temp, False, default_geo_matrix())
+                    geo_status = geo_export.main(context, temp, False, default_geo_matrix(), [coll])
+                    if geo_status != {"FINISHED"}:
+                        raise ValueError("GEO export was cancelled. Check the Blender console; PS1 GEO face indices are one byte, so a face cannot reference a vertex above index 255.")
                     exported = os.path.join(temp, coll.name)
                     if not os.path.isfile(exported):
                         candidates = [os.path.join(temp, n) for n in os.listdir(temp) if n.lower().endswith(".geo")]
@@ -450,6 +466,21 @@ class ExportNFSVIV(Operator, ExportHelper):
             rebuilt = [(n, p) for n, p in rebuilt if n.lower() != "nfs4_hd_map.bin"]
             source_slots = {"h": 0, "i": 1, "l": 2, "d": 3, "g": 4, "": 5}
             hd_map = bytearray([255] * 51)
+            hd_colors = bytearray([255] * 51)
+            imported_color = int(coll.get("nfs_viv_color", 255))
+            if self.hd_palette_color == "IMPORTED":
+                target_color = imported_color
+            elif self.hd_palette_color == "ALL":
+                target_color = 255
+            else:
+                target_color = int(self.hd_palette_color)
+            has_color_specific_hd = False
+            restricted_palette_sources = set()
+            for material in materials.values():
+                source_file = material.get("nfs_psh_source_file")
+                if (material.get("nfs_hd_color_specific") and material.get("nfs_psh_palette_color")
+                        and source_file and source_file.lower() in hd_members):
+                    restricted_palette_sources.add(source_file.lower())
             for texture_index in range(len(hd_map)):
                 material = materials.get(texture_index)
                 source_file = material.get("nfs_psh_source_file") if material is not None else None
@@ -464,8 +495,16 @@ class ExportNFSVIV(Operator, ExportHelper):
                 suffix = stem[-1:] if stem and stem[-1:] in source_slots else ""
                 if suffix in source_slots:
                     hd_map[texture_index] = source_slots[suffix]
+                    restrict_to_color = material.get("nfs_hd_color_specific") or (
+                        material.get("nfs_psh_palette_color") and source_file.lower() in restricted_palette_sources)
+                    if restrict_to_color:
+                        has_color_specific_hd = True
+                        if 0 <= target_color < 16:
+                            hd_colors[texture_index] = target_color
+            if has_color_specific_hd and not 0 <= target_color < 16:
+                raise ValueError("This collection has no saved paint color. Choose a color in HD color for palette textures.")
             if any(value != 255 for value in hd_map):
-                rebuilt.append(("NFS4_HD_MAP.BIN", bytes(hd_map)))
+                rebuilt.append(("NFS4_HD_MAP.BIN", bytes(hd_map + hd_colors)))
             rebuilt.extend(hd_images)
             output = write_bigf(rebuilt)
             with open(self.filepath, "wb") as f:
@@ -489,7 +528,25 @@ class ExportNFSVIV(Operator, ExportHelper):
             self.layout.label(text="Source GEO: %s" % coll.get("nfs_viv_geo_member", "unknown"))
             self.layout.label(text="Install into the matching vehicle variant VIV.")
         self.layout.prop(self, "export_geometry")
+        self.layout.label(text="UV changes are saved only when Export geometry and UVs is checked")
         self.layout.prop(self, "export_psh_edits")
+        self.layout.prop(self, "hd_palette_color")
+        if coll and coll.get("nfs_viv_source"):
+            palette_materials = []
+            for index, material in sorted(_collection_materials(coll).items()):
+                image = next((node.image for node in material.node_tree.nodes
+                              if material.use_nodes and node.type == "TEX_IMAGE"
+                              and node.image is not None and tuple(node.image.size) == (512, 512)), None)
+                if image is not None and "nfs_hd_color_specific" in material:
+                    palette_materials.append((index, material))
+            if palette_materials:
+                box = self.layout.box()
+                box.label(text="HD color restriction per material")
+                box.label(text="For palette pages, the restriction follows the same PSH atlas")
+                for index, material in palette_materials:
+                    row = box.row(align=True)
+                    row.label(text="%d — %s" % (index, material.name))
+                    row.prop(material, '["nfs_hd_color_specific"]', text="Only selected color")
 
 
 def menu_import(self, context):

@@ -44,14 +44,14 @@ VERTEX_SCALE = 256
 NVERTEX_SCALE = 4096
 
 
-def main(context, export_path, export_traffic, m):
+def main(context, export_path, export_traffic, m, collections=None):
 	os.system('cls')
 	start_time = time.time()
 	
 	if bpy.ops.object.mode_set.poll():
 		bpy.ops.object.mode_set(mode='OBJECT')
 	
-	for main_collection in bpy.context.scene.collection.children:
+	for main_collection in collections if collections is not None else bpy.context.scene.collection.children:
 		is_hidden = bpy.context.view_layer.layer_collection.children.get(main_collection.name).hide_viewport
 		is_excluded = bpy.context.view_layer.layer_collection.children.get(main_collection.name).exclude
 		
@@ -97,7 +97,7 @@ def main(context, export_path, export_traffic, m):
 			if index in object_by_index:
 				object = object_by_index[index]
 				
-				numVertex, numFacet, vertices, normals, faces, status = read_object(object)
+				numVertex, numFacet, vertices, normals, faces, status, vertices_exact = read_object(object)
 				
 				if status == 1:
 					return {'CANCELLED'}
@@ -128,9 +128,9 @@ def main(context, export_path, export_traffic, m):
 					print("WARNING: object %s is missing parameter %s. Assuming some value (0)." % (object.name, '"object_unk2"'))
 					object_unk2 = 0
 				
-				Transformer_zObj = [numVertex, numFacet, translation, object_unk0, object_unk1, object_unk2, vertices, normals, faces]
+				Transformer_zObj = [numVertex, numFacet, translation, object_unk0, object_unk1, object_unk2, vertices, normals, faces, vertices_exact]
 			else:
-				Transformer_zObj = [0, 0, [0, 0, 0], 0, 0, 0, [], [], []]
+				Transformer_zObj = [0, 0, [0, 0, 0], 0, 0, 0, [], [], [], []]
 			
 			Transformer_zObjects.append(Transformer_zObj)
 		
@@ -152,16 +152,71 @@ def main(context, export_path, export_traffic, m):
 
 
 def read_object(object):
+	source_uv_layer = object.data.uv_layers.active
+	if source_uv_layer is None:
+		print("ERROR: mesh %s has no active UV layer." % object.name)
+		return (0, 0, [], {}, [], 1)
+	uv_layer_name = source_uv_layer.name
+	# Export the edited source mesh directly when no visible modifier changes its
+	# geometry. Blender's evaluated to_mesh() can expose a different active UV
+	# layer, which makes otherwise valid wheel geometry sample empty atlas pixels.
+	use_evaluated_mesh = any(modifier.show_viewport for modifier in object.modifiers)
+	evaluated_object = None
+	if use_evaluated_mesh:
+		depsgraph = bpy.context.evaluated_depsgraph_get()
+		evaluated_object = object.evaluated_get(depsgraph)
+		mesh = evaluated_object.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
+	else:
+		mesh = object.data
+	if mesh is None:
+		print("ERROR: could not evaluate mesh %s for GEO export." % object.name)
+		return (0, 0, [], {}, [], 1)
+	triangulated_mesh = None
+	try:
+		if mesh.uv_layers.get(uv_layer_name) is None:
+			print("ERROR: evaluated mesh %s does not contain its source UV layer %s." %
+			      (mesh.name, uv_layer_name))
+			return (0, 0, [], {}, [], 1)
+		if any(len(face.vertices) > 3 for face in mesh.polygons):
+			bm = bmesh.new()
+			try:
+				bm.from_mesh(mesh)
+				bm.faces.ensure_lookup_table()
+				flag_attribute = mesh.attributes.get("flag")
+				if flag_attribute is not None and flag_attribute.domain == 'FACE' and flag_attribute.data_type == 'INT':
+					flag_layer = bm.faces.layers.int.get("flag") or bm.faces.layers.int.new("flag")
+					for face in bm.faces:
+						if face.index < len(flag_attribute.data):
+							face[flag_layer] = flag_attribute.data[face.index].value
+				bmesh.ops.triangulate(bm, faces=[face for face in bm.faces if len(face.verts) > 3],
+				                      quad_method='BEAUTY', ngon_method='BEAUTY')
+				triangulated_mesh = bpy.data.meshes.new(mesh.name + "_GEO_Triangulated")
+				bm.to_mesh(triangulated_mesh)
+				for material in mesh.materials:
+					triangulated_mesh.materials.append(material)
+				triangulated_mesh.update()
+			finally:
+				bm.free()
+			return _read_object_mesh(object, triangulated_mesh, uv_layer_name)
+		return _read_object_mesh(object, mesh, uv_layer_name)
+	finally:
+		if triangulated_mesh is not None:
+			bpy.data.meshes.remove(triangulated_mesh)
+		if evaluated_object is not None:
+			evaluated_object.to_mesh_clear()
+
+
+def _read_object_mesh(object, mesh, uv_layer_name):
 	numVertex = 0
 	numFacet = 0
 	vertices = []
+	vertices_exact = []
 	normals = {}
 	faces = []
 	vertices_list = {}
 	vert_ind = 0
 	
 	# Inits
-	mesh = object.data
 	mesh.update()
 	loops = mesh.loops
 	bm = bmesh.new()
@@ -169,17 +224,22 @@ def read_object(object):
 	
 	for vert in bm.verts:
 		if vert.hide == False:
+			vertices_exact.append([float(vert.co[i]) * VERTEX_SCALE for i in range(3)])
 			vertices.append([round(vert_co*VERTEX_SCALE) for i, vert_co in enumerate(vert.co)])
 			vertices_list[vert.index] = vert_ind
 			vert_ind += 1
 	
 	if len(vertices) > 0xFFFF:
 		print("ERROR: number of vertices higher than the supported by the game on mesh %s." % mesh.name)
-		return (numVertex, numFacet, vertices, normals, faces, 1)
+		return (numVertex, numFacet, vertices, normals, faces, 1, [])
 	
 	numVertex = len(vertices)
 	
-	uv_layer = mesh.uv_layers.active.data
+	uv_layer = mesh.uv_layers.get(uv_layer_name)
+	if uv_layer is None:
+		print("ERROR: mesh %s is missing UV layer %s." % (mesh.name, uv_layer_name))
+		return (numVertex, numFacet, vertices, normals, faces, 1, [])
+	uv_layer = uv_layer.data
 	flags = mesh.attributes.get("flag")
 	
 	for face in mesh.polygons:
@@ -204,36 +264,44 @@ def read_object(object):
 		try:
 			if mesh.materials[face.material_index] == None:
 				print("ERROR: face without material found on mesh %s." % mesh.name)
-				return (numVertex, numFacet, vertices, normals, faces, 1)
+				return (numVertex, numFacet, vertices, normals, faces, 1, [])
 		except:
 			print("ERROR: face without material found on mesh %s." % mesh.name)
-			return (numVertex, numFacet, vertices, normals, faces, 1)
+			return (numVertex, numFacet, vertices, normals, faces, 1, [])
 		
 		textureIndex = int(mesh.materials[face.material_index].name)
 		
 		if len(face.vertices) > 3:
 			print("ERROR: non triangular face on mesh %s." % mesh.name)
-			return (numVertex, numFacet, vertices, normals, faces, 1)
+			return (numVertex, numFacet, vertices, normals, faces, 1, [])
 		
 		vertexId0, vertexId1, vertexId2 = vertexIds
+		if any(vertex_id < 0 or vertex_id > 0xFF for vertex_id in vertexIds):
+			print("ERROR: PS1 GEO stores face vertex indices in one byte; mesh %s references vertex index %d." %
+			      (mesh.name, max(vertexIds)))
+			return (numVertex, numFacet, vertices, normals, faces, 1, [])
 		
+		exact_uvs = []
 		for i, uv in enumerate(uvs):
+			u = float(uv[0])
+			v = 1.0 - float(uv[1])
+			exact_uvs.extend((u, v))
 			uvs[i] = int(round(uv[0]*255)) & 0xFF, int(round((1.0 - uv[1])*255)) & 0xFF
 		
 		uv0, uv1, uv2 = uvs
 		
-		faces.append([flag, textureIndex, vertexId0, vertexId1, vertexId2, uv0, uv1, uv2])
+		faces.append([flag, textureIndex, vertexId0, vertexId1, vertexId2, uv0, uv1, uv2] + exact_uvs)
 	
 	if len(faces) > 0xFFFF:
 		print("ERROR: number of faces higher than the supported by the game on mesh %s." % mesh.name)
-		return (numVertex, numFacet, vertices, normals, faces, 1)
+		return (numVertex, numFacet, vertices, normals, faces, 1, [])
 	
 	numFacet = len(faces)
 	
 	bm.clear()
 	bm.free()
 	
-	return (numVertex, numFacet, vertices, normals, faces, 0)
+	return (numVertex, numFacet, vertices, normals, faces, 0, vertices_exact)
 
 
 def write_Transformer_zUV(f, Transformer_zUV):
@@ -246,7 +314,7 @@ def write_Transformer_zUV(f, Transformer_zUV):
 
 
 def write_Transformer_zFacet(f, Transformer_zFacet):
-	flag, textureIndex, vertexId0, vertexId1, vertexId2, uv0, uv1, uv2 = Transformer_zFacet
+	flag, textureIndex, vertexId0, vertexId1, vertexId2, uv0, uv1, uv2 = Transformer_zFacet[:8]
 	
 	f.write(struct.pack('<h', flag))
 	f.write(struct.pack('<B', textureIndex))
@@ -261,7 +329,7 @@ def write_Transformer_zFacet(f, Transformer_zFacet):
 
 
 def write_Transformer_zObj(f, export_traffic, index, Transformer_zObj):
-	numVertex, numFacet, translation, unk0, unk1, unk2, vertices, normals, faces = Transformer_zObj
+	numVertex, numFacet, translation, unk0, unk1, unk2, vertices, normals, faces = Transformer_zObj[:9]
 	
 	f.write(struct.pack('<H', numVertex))
 	f.write(struct.pack('<H', numFacet))
@@ -309,6 +377,23 @@ def write_Transformer_zScene(file_path, export_traffic, Transformer_zScene):
 		for index in range(0, len(Transformer_zObjects)):
 			Transformer_zObj = Transformer_zObjects[index]
 			write_Transformer_zObj(f, export_traffic, index, Transformer_zObj)
+		if not export_traffic:
+			payload = bytearray()
+			for Transformer_zObj in Transformer_zObjects:
+				faces = Transformer_zObj[8]
+				vertices = Transformer_zObj[6]
+				vertices_exact = Transformer_zObj[9] if len(Transformer_zObj) > 9 else [[float(c) for c in v] for v in vertices]
+				payload += struct.pack('<H', len(vertices_exact))
+				for vertex in vertices_exact:
+					payload += struct.pack('<3f', *vertex)
+				payload += struct.pack('<H', len(faces))
+				for face in faces:
+					if len(face) < 14:
+						return 1
+					payload += struct.pack('<6f', *(float(face[i]) for i in range(8, 14)))
+			f.write(b'NFSUV16\0')
+			f.write(struct.pack('<HHI', 2, len(Transformer_zObjects), len(payload)))
+			f.write(payload)
 	
 	return 0
 
